@@ -1,78 +1,80 @@
 # magpie-scnet-auth
 
-**Magpie / OpenCode provider 插件：接入 SCNet 计算互联网（scnet.cn）的大模型。**
+**Magpie provider plugin for SCNet (scnet.cn) LLM models.**
 
-安装后，SCNet 平台上的模型会作为 `scnet` 供应商出现在 magpie 中，Claude Code、Codex、dsh 等 agent 均可直接选用。
+English | [简体中文](README.zh-CN.md)
 
-- 支持账号密码登录（无需安装 SCNet 客户端，无需抓包）
-- 兼容标准 OpenAI Chat Completions 协议
-- 透传工具调用（tool calls）与推理过程（reasoning content）
+Once installed, the models served by the SCNet platform appear in magpie as a `scnet` provider and become available to every agent that magpie drives (Claude Code, Codex, dsh, and others).
+
+- Sign in with an SCNet username and password — no desktop client, no packet capture
+- Speaks standard OpenAI Chat Completions
+- Passes through tool calls and reasoning content
 
 ---
 
-## 支持的模型
+## Supported models
 
-平台 `GET /models` 返回 32 个模型，包括：
+The platform `GET /models` endpoint returns 32 models, including:
 
-| 系列 | 模型 |
+| Family | Models |
 |---|---|
-| 智谱 | GLM-5.3-Flash、GLM-5.3、GLM-5.2、GLM-5.1、GLM-5 |
-| 通义 | Qwen3.8-Max、Qwen3.8-Flash、Qwen3.7-Max、Qwen3.7-Plus、Qwen3.6-Plus、Qwen3-235B-A22B |
-| DeepSeek | DeepSeek-V4-Pro-0813、DeepSeek-V4.1-Flash、DeepSeek-V4.1-Flash-1017、DeepSeek-V4-Flash-0731 |
-| Kimi | Kimi-K3.1-Pro、Kimi-K3、Kimi-K2.7-Code、Kimi-K2.6 |
-| MiniMax | MiniMax-M3.1-Flash、MiniMax-M3、MiniMax-M2.7、MiniMax-M2.5 |
-| 其他 | SCNet-Max、Spark-X2.5、MiMo-V2.5-Pro |
+| Zhipu | GLM-5.3-Flash, GLM-5.3, GLM-5.2, GLM-5.1, GLM-5 |
+| Qwen | Qwen3.8-Max, Qwen3.8-Flash, Qwen3.7-Max, Qwen3.7-Plus, Qwen3.6-Plus, Qwen3-235B-A22B |
+| DeepSeek | DeepSeek-V4-Pro-0813, DeepSeek-V4.1-Flash, DeepSeek-V4.1-Flash-1017, DeepSeek-V4-Flash-0731 |
+| Kimi | Kimi-K3.1-Pro, Kimi-K3, Kimi-K2.7-Code, Kimi-K2.6 |
+| MiniMax | MiniMax-M3.1-Flash, MiniMax-M3, MiniMax-M2.7, MiniMax-M2.5 |
+| Others | SCNet-Max, Spark-X2.5, MiMo-V2.5-Pro |
 
-**额度按模型隔离**：账号并非对所有模型都有余额，未开通的模型调用会返回 `402 Insufficient Balance`。插件默认列出全部模型，可按需筛选（见「配置」）。
+**Quota is granted per model.** An account does not necessarily have balance for every model; calls to an unprovisioned model return `402 Insufficient Balance`. The plugin lists all models by default and offers filtering (see Configuration).
 
 ---
 
-## 安装
+## Install
 
 ```bash
-# 方式一：从目录加载
+# From a local folder
 magpie plugin add /path/to/magpie-scnet-auth
 
-# 方式二：发布到 npm 后按包名安装
-magpie plugin add magpie-scnet-auth
-
-# 方式三：从 GitHub
+# From GitHub
 magpie plugin add github:RrOrange/magpie-scnet-auth
+
+# From npm, once published
+magpie plugin add magpie-scnet-auth
 ```
 
-安装后在 magpie 的「供应商」页可看到「SCNet 计算互联网」。
+After installation, the provider **SCNet** appears on the Providers page in magpie.
 
 ---
 
-## 登录
+## Sign in
 
-### 方式一：账号密码（推荐）
+### Username and password (recommended)
 
-在 magpie 窗口中操作：
+In the magpie window:
 
-1. 供应商 → **SCNet 计算互联网** → 点击右侧 **＋**
-2. 选择 **SCNet 账号密码登录**
-3. 输入用户名/手机号 → 下一步 → 输入密码 → 登录
+1. Providers → **SCNet** → click **＋**
+2. Choose **Sign in with SCNet username and password**
+3. Enter the username / phone number → Next → enter the password → Sign in
 
-密码仅用于当次换取 API Key，不会被保存；保存的是平台返回的 `sk-…` 密钥。
+The password is used only to exchange for an API key and is not stored; only the returned `sk-…` key is saved.
 
-命令行等价方式：
+Command-line equivalent:
 
 ```bash
-node login.mjs          # 交互输入账号与密码
+node login.mjs          # prompts for username and password
 ```
 
-### 方式二：API Key
+### API key
 
-在平台已创建密钥的情况下，登录时选择「API Key」，粘贴 `sk-…`。
+If an API key already exists on the platform, choose **API Key** and paste `sk-…`.
 
-### 方式三：本机客户端凭据
+### Local client credentials
 
-若本机已安装并登录 SCNet 客户端（`~/.sclaw/agent/scnet-credentials/`），登录时输入 `local`，插件会自动读取并校验可用密钥。
+If the SCNet desktop client is installed and signed in (`~/.sclaw/agent/scnet-credentials/`), enter `local` and the plugin reads and validates the available key automatically.
 
-### 方式四：其他兼容服务
+### Any other compatible service
 
-登录时粘贴 JSON，可指向任意 OpenAI 兼容端点：
+Paste a JSON credential pointing at any OpenAI-compatible endpoint:
 
 ```json
 {"baseUrl":"https://example.com/v1","apiKey":"sk-…","models":["model-a","model-b"]}
@@ -80,60 +82,32 @@ node login.mjs          # 交互输入账号与密码
 
 ---
 
-## 配置
+## Configuration
 
-通过环境变量控制（修改后执行 `magpie plugin off scnet-plugin` / `on scnet-plugin` 生效）：
+Environment variables, applied after `magpie plugin off scnet-plugin` / `on scnet-plugin`:
 
-| 变量 | 说明 |
+| Variable | Description |
 |---|---|
-| `SCNET_MODELS` | `all`（默认）列出全部；`known` 仅列本机已验证有余额的模型；或逗号分隔的模型 ID |
-| `SCNET_PROBE` | 设为 `1` 时逐个探测模型余额（`max_tokens:1`），仅保留可用模型 |
-| `SCNET_BASE` | 覆盖 API 基址，默认 `https://api.scnet.cn/api/llm/v1` |
-| `SCNET_AGENT_DIR` | 覆盖客户端配置目录，默认 `~/.sclaw/agent` |
+| `SCNET_MODELS` | `all` (default) lists everything; `known` lists only models verified on this machine; or a comma-separated list of model IDs |
+| `SCNET_PROBE` | Set to `1` to probe each model's balance (`max_tokens:1`) and keep only usable ones |
+| `SCNET_BASE` | Overrides the API base URL (default `https://api.scnet.cn/api/llm/v1`) |
+| `SCNET_AGENT_DIR` | Overrides the client config directory (default `~/.sclaw/agent`) |
 
 ---
 
-## 工作原理
+## Authentication and multiple accounts
 
-平台为标准 OpenAI 兼容接口：
-
-```
-POST https://api.scnet.cn/api/llm/v1/chat/completions
-Authorization: Bearer <apiKey>
-{"model":"GLM-5.3-Flash","messages":[…],"stream":true,"tools":[…]}
-```
-
-响应为 SSE，文本位于 `choices[].delta.content`，思考过程位于 `choices[].delta.reasoning_content`，工具调用位于 `choices[].delta.tool_calls`。插件不改写协议，仅负责凭据管理、模型列表与鉴权。
-
-账号密码登录链路：
+The plugin contains no authentication layer of its own. A credential is simply the user's API key, stored locally:
 
 ```
-POST https://www.scnet.cn/ac/api/auth/loginDesktopClient.action
-     username + RSA(password) + encrypted=true + ph=1
-  → {"code":"0"}  +  Set-Cookie: jsessionid, Token
-
-POST https://www.scnet.cn/acx/llm/api-key/createActivityApiKey   (Cookie: Token=…)
-  → {"code":"0","data":{"apiKey":"sk-…","baseUrl":"https://api.scnet.cn/api/llm/v1"}}
+~/.config/magpie/plugin-auth.json     # mode 0600, readable only by the current user
 ```
 
-`createActivityApiKey` 具有幂等性：同一账号重复调用返回同一密钥。
-登录前会先查询 `isNeedCpatcha`；若账号或风控要求图形验证码，插件会提示改用 API Key。
+Identity is verified by the SCNet platform (Bearer token). The same plugin can be installed by several people, each using their own credential.
 
----
+magpie supports multiple accounts for one provider: click **＋** again to add another, mark one as preferred, and the next account is used automatically when the current one runs out of quota.
 
-## 鉴权与多账号
-
-插件本身不包含鉴权层。凭据即用户的 API Key，保存在本机：
-
-```
-~/.config/magpie/plugin-auth.json     # 权限 0600，仅当前用户可读
-```
-
-身份校验由 SCNet 平台（Bearer Token）完成。同一份插件可被多人安装，各自使用自己的凭据。
-
-magpie 支持同一供应商多账号：重复点击 **＋** 即可添加，可设置首选账号，并在前一个账号额度耗尽时自动切换。
-
-如需与他人共享额度，应共享 magpie 网关而非插件：
+To share quota with someone else, share the magpie gateway rather than the plugin:
 
 ```bash
 magpie gateway-key add friend --models 'scnet-plugin/*'
@@ -142,29 +116,30 @@ magpie gateway-key limit friend day --tokens 5000000
 
 ---
 
-## 已知限制
+## Known limitations
 
-- 额度按模型计算，未开通模型返回 `402`。
-- 模型上下文与输出上限取自客户端元数据（如 GLM-5.3-Flash 为 1048576 / 131072）。
-- 服务端偶发 `500 internal_error`，重试即可，与插件无关。
-- 插件仅代理对话能力，不包含平台的图片/视频生成接口。
-- 并发受 `magpie.maxConcurrency` 限制（默认 4），避免触发风控。
+- Quota is counted per model; unprovisioned models return `402`.
+- Context and output limits come from the client metadata (e.g. GLM-5.3-Flash: 1048576 / 131072).
+- The server occasionally returns `500 internal_error`; retrying resolves it.
+- The plugin proxies chat only; it does not expose the platform's image or video generation APIs.
+- Concurrency is limited by `magpie.maxConcurrency` (default 4) to avoid triggering rate limits.
 
 ---
 
-## 目录结构
+## Layout
 
 ```
 magpie-scnet-auth/
-├── index.mjs     插件主体（provider 声明、凭据解析、模型发现）
-├── login.mjs     账号密码登录工具（换 key 并写入 magpie）
-├── package.json  包声明
-├── README.md     本文档
+├── index.mjs            provider declaration, credential resolution, model discovery
+├── login.mjs            username/password login helper (exchanges for a key and writes it into magpie)
+├── package.json         package manifest
+├── README.md            this document
+├── README.zh-CN.md      Chinese translation
 └── LICENSE
 ```
 
 ---
 
-## 许可
+## License
 
 MIT

@@ -1,0 +1,41 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check tag matches package.json version
+        run: |
+          PKG=$(node -p "require('./package.json').version")
+          TAG="${GITHUB_REF_NAME#v}"
+          echo "tag=$GITHUB_REF_NAME  package.json=$PKG"
+          if [ "$PKG" != "$TAG" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match package.json version ${PKG}"
+            exit 1
+          fi
+
+      - name: Package plugin
+        run: |
+          NAME=$(node -p "require('./package.json').name")
+          mkdir -p dist
+          zip -r "dist/${NAME}-${GITHUB_REF_NAME}.zip" . \
+            -x '.git/*' -x 'dist/*' -x '.github/*' -x 'node_modules/*'
+          unzip -l "dist/${NAME}-${GITHUB_REF_NAME}.zip"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
+          generate_release_notes: true
+          fail_on_unmatched_files: true
