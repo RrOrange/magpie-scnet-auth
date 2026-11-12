@@ -64,6 +64,17 @@ magpie plugin add magpie-scnet-auth
 node login.mjs          # 交互输入账号与密码
 ```
 
+### 短信验证码
+
+1. 供应商 → **SCNet** → **＋** → 选「① 发送短信验证码」，填手机号，会收到 6 位验证码
+2. 再选「② 短信验证码登录」，填手机号和验证码
+
+或命令行一步完成：
+
+```bash
+node login-sms.mjs
+```
+
 ### API Key
 
 若平台已创建密钥，登录时选择 **API Key**，粘贴 `sk-…`。
@@ -132,6 +143,7 @@ magpie gateway-key limit friend day --tokens 5000000
 magpie-scnet-auth/
 ├── index.mjs            provider 声明、凭据解析、模型发现
 ├── login.mjs            账号密码登录工具（换取 key 并写入 magpie）
+├── login-sms.mjs        短信验证码登录工具（同上，一步完成）
 ├── package.json         包声明
 ├── README.md            英文文档
 ├── README.zh-CN.md      中文文档
