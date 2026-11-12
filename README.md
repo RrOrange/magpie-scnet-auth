@@ -1,4 +1,4 @@
-# opencode-scnet-auth
+# magpie-scnet-auth
 
 **Magpie / OpenCode provider 插件：接入 SCNet 计算互联网（scnet.cn）的大模型。**
 
@@ -31,13 +31,13 @@
 
 ```bash
 # 方式一：从目录加载
-magpie plugin add /path/to/opencode-scnet-auth
+magpie plugin add /path/to/magpie-scnet-auth
 
 # 方式二：发布到 npm 后按包名安装
-magpie plugin add opencode-scnet-auth
+magpie plugin add magpie-scnet-auth
 
 # 方式三：从 GitHub
-magpie plugin add github:YOUR_GITHUB_NAME/opencode-scnet-auth
+magpie plugin add github:RrOrange/magpie-scnet-auth
 ```
 
 安装后在 magpie 的「供应商」页可看到「SCNet 计算互联网」。
@@ -155,7 +155,7 @@ magpie gateway-key limit friend day --tokens 5000000
 ## 目录结构
 
 ```
-opencode-scnet-auth/
+magpie-scnet-auth/
 ├── index.mjs     插件主体（provider 声明、凭据解析、模型发现）
 ├── login.mjs     账号密码登录工具（换 key 并写入 magpie）
 ├── package.json  包声明
