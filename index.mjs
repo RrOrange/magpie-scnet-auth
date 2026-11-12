@@ -79,6 +79,8 @@ const WEB_ORIGIN = "https://www.scnet.cn"
 const LOGIN_URL = `${WEB_ORIGIN}/ac/api/auth/loginDesktopClient.action`
 const CAPTCHA_URL = `${WEB_ORIGIN}/ac/api/auth/isNeedCpatcha.action`
 const ACTIVITY_KEY_URL = `${WEB_ORIGIN}/acx/llm/api-key/createActivityApiKey`
+const SEND_CODE_URL = `${WEB_ORIGIN}/ac/api/auth/sendDesktopClientPhoneCode.action`
+const LOGIN_CODE_URL = `${WEB_ORIGIN}/ac/api/auth/loginDesktopClientByPhoneCode.action`
 const RSA_PUB = "MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALaXEnbjI6fjy+t9W9AiO/KS0q+b/OZFS+7ykinLbiriUx9P8BcuuHnVbXNiZp5jW70eVGBtX4DhGUPzJa1YT/8CAwEAAQ=="
 const UA = "scnet-client/4.1.2"
 
@@ -102,6 +104,64 @@ function cookiesOf(res) {
   const list = typeof res.headers.getSetCookie === "function" ? res.headers.getSetCookie() : []
   const raw = list.length ? list : (res.headers.get("set-cookie") ?? "").split(/,(?=[^;,]+=)/)
   return raw.map((c) => String(c).split(";")[0].trim()).filter(Boolean).join("; ")
+}
+
+// ---------- 短信验证码登录 ----------
+// 两步：POST sendDesktopClientPhoneCode {phoneNum} → Set-Cookie（服务端记住手机号）
+//       POST loginDesktopClientByPhoneCode {messageCode} + 该 Cookie → 登录
+let pendingSms = null
+
+async function sendPhoneCode(phoneNum) {
+  const phone = String(phoneNum || "").trim()
+  if (!/^\d{6,15}$/.test(phone)) throw new Error("手机号格式不对")
+  const r = await fetch(SEND_CODE_URL, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded", "user-agent": UA },
+    body: new URLSearchParams({ phoneNum: phone }),
+    signal: AbortSignal.timeout(20000),
+  })
+  const j = await r.json()
+  if (String(j?.code) !== "0") throw new Error(`发送验证码失败：${j?.msg || j?.code || r.status}`)
+  const cookie = cookiesOf(r)
+  pendingSms = { phoneNum: phone, cookie, at: Date.now() }
+  return { phoneNum: phone, cookie }
+}
+
+async function exchangePhoneCode(cookie, messageCode) {
+  const code = String(messageCode || "").trim()
+  if (!code) throw new Error("请填写短信验证码")
+  const r = await fetch(LOGIN_CODE_URL, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded", "user-agent": UA, ...(cookie ? { cookie } : {}) },
+    body: new URLSearchParams({ messageCode: code }),
+    signal: AbortSignal.timeout(20000),
+  })
+  const j = await r.json()
+  if (String(j?.code) !== "0") throw new Error(`短信登录失败：${j?.msg || j?.code || r.status}`)
+  const full = [cookie, cookiesOf(r)].filter(Boolean).join("; ")
+  const r2 = await fetch(ACTIVITY_KEY_URL, {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: full, "user-agent": UA },
+    body: "{}",
+    signal: AbortSignal.timeout(20000),
+  })
+  const j2 = await r2.json()
+  const key = j2?.data?.apiKey
+  if (!key) throw new Error(`取 API Key 失败：${j2?.msg || j2?.code || r2.status}`)
+  return { key, baseUrl: j2.data.baseUrl }
+}
+
+async function loginWithPhoneCode(phoneNum, messageCode) {
+  const phone = String(phoneNum || "").trim()
+  let cookie = ""
+  if (pendingSms && pendingSms.phoneNum === phone && Date.now() - pendingSms.at < 5 * 60 * 1000) {
+    cookie = pendingSms.cookie
+  } else {
+    cookie = (await sendPhoneCode(phone)).cookie
+  }
+  const out = await exchangePhoneCode(cookie, messageCode)
+  pendingSms = null
+  return out
 }
 
 async function loginWithPassword(username, password) {
@@ -301,6 +361,35 @@ export const SCNetAuthPlugin = async ({ client }) => ({
       },
       {
         type: "api",
+        label: "① 发送短信验证码",
+        prompts: [{ type: "text", key: "phoneNum", message: "手机号（接收验证码）" }],
+        async authorize(inputs) {
+          try {
+            await sendPhoneCode(inputs?.phoneNum)
+            return { type: "failed", error: "验证码已发送。请再选「② 短信验证码登录」，填入手机号和收到的 6 位验证码。" }
+          } catch (e) {
+            return { type: "failed", error: String(e?.message || e).slice(0, 500) }
+          }
+        },
+      },
+      {
+        type: "api",
+        label: "② 短信验证码登录",
+        prompts: [
+          { type: "text", key: "phoneNum", message: "手机号" },
+          { type: "text", key: "messageCode", message: "短信验证码" },
+        ],
+        async authorize(inputs) {
+          try {
+            const out = await loginWithPhoneCode(inputs?.phoneNum, inputs?.messageCode)
+            return { type: "success", key: out.key, metadata: { phoneNum: String(inputs?.phoneNum || ""), baseUrl: out.baseUrl } }
+          } catch (e) {
+            return { type: "failed", error: String(e?.message || e).slice(0, 500) }
+          }
+        },
+      },
+      {
+        type: "api",
         label: "API Key（local = 读本机客户端；或粘贴 sk-… / JSON）",
         placeholder: "local",
       },
@@ -351,4 +440,4 @@ export const SCNetAuthPlugin = async ({ client }) => ({
   },
 })
 
-export const _internal = { PROVIDER, BASE, keysFromClient, clientKey, clientCatalog, toModel, loginWithPassword, rsaEncrypt }
+export const _internal = { PROVIDER, BASE, keysFromClient, clientKey, clientCatalog, toModel, loginWithPassword, rsaEncrypt, sendPhoneCode, loginWithPhoneCode, exchangePhoneCode }
