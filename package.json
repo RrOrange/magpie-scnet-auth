@@ -1,0 +1,42 @@
+{
+  "name": "magpie-scnet-auth",
+  "version": "0.1.0",
+  "description": "Magpie / OpenCode provider plugin for SCNet (scnet.cn) LLM models - password login, OpenAI-compatible, tool calls and reasoning passthrough.",
+  "type": "module",
+  "main": "./index.mjs",
+  "files": [
+    "index.mjs",
+    "login.mjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "magpie",
+    "scnet",
+    "sugon",
+    "glm",
+    "qwen",
+    "deepseek",
+    "kimi",
+    "minimax"
+  ],
+  "license": "MIT",
+  "magpie": {
+    "maxConcurrency": 4,
+    "name": "SCNet 计算互联网",
+    "summary": {
+      "en": "All models on the SCNet platform (GLM-5.3-Flash, Qwen3.8, Kimi-K3 …), reusing the SCNet client's credentials.",
+      "zh": "把 SCNet 计算互联网平台的全部模型（GLM-5.3-Flash、Qwen3.8、Kimi-K3…）接进 magpie，直接复用客户端的凭据。"
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/RrOrange/magpie-scnet-auth.git"
+  },
+  "homepage": "https://github.com/RrOrange/magpie-scnet-auth#readme",
+  "bugs": {
+    "url": "https://github.com/RrOrange/magpie-scnet-auth/issues"
+  }
+}

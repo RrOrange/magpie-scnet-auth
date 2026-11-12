@@ -1,0 +1,5 @@
+node_modules/
+*.log
+plugin-auth.json
+token.txt
+.DS_Store
