@@ -1,6 +1,6 @@
 {
   "name": "magpie-scnet-auth",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Magpie / OpenCode provider plugin for SCNet (scnet.cn) LLM models - password login, OpenAI-compatible, tool calls and reasoning passthrough.",
   "type": "module",
   "main": "./index.mjs",
