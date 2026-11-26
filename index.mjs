@@ -9,13 +9,18 @@
 //       %USERPROFILE%\.sclaw\agent\models.json              → providers.scnet.models[]（含 contextWindow 等）
 //
 // 所以插件不需要任何抓包或注入：登录时填 local，它自己去客户端目录里取 key。
+// 插件同时内置一个本地过滤代理：SCNet 上游会拒绝 logit_bias/n，并在复杂 tool schema
+// 下随机返回 code 10013；代理会剥离这些参数，并对 10013 逐级简化工具 schema 后重试。
 
 import { readFileSync, readdirSync, statSync } from "node:fs"
+import { createServer } from "node:http"
+import { request as httpsRequest } from "node:https"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
 const PROVIDER = "scnet"
-const BASE = process.env.SCNET_BASE || "https://api.scnet.cn/api/llm/v1"
+const UPSTREAM_BASE = (process.env.SCNET_BASE || "https://api.scnet.cn/api/llm/v1").replace(/\/+$/, "")
+const PROXY_PORT = Number(process.env.SCNET_PROXY_PORT || 3427)
 const AGENT_DIR = process.env.SCNET_AGENT_DIR || join(homedir(), ".sclaw", "agent")
 const CRED_DIR = join(AGENT_DIR, "scnet-credentials")
 const MODELS_FILE = join(AGENT_DIR, "models.json")
@@ -29,6 +34,151 @@ const FALLBACK = { "GLM-5.3-Flash": { name: "GLM-5.3-Flash", context: 1000000, o
 //   SCNET_MODELS=known            只列本机实测有额度的（GLM-5.3-Flash / SCNet-Max）
 //   SCNET_PROBE=1                 逐个实测余额（max_tokens=1），只留有额度的
 const KNOWN_IDS = ["GLM-5.3-Flash", "SCNet-Max"]
+
+// ---------- 内置过滤代理 ----------
+// SCNet rejects logit_bias/n and intermittently rejects complex tool schemas with
+// code 10013 "Invalid request parameters". The proxy strips unsupported params,
+// retries 10013 by progressively simplifying tool schemas, and falls back to no tools.
+const DROP_PARAMS = ["logit_bias", "n"]
+const MAX_ATTEMPTS = 4
+let proxyState = null // { server, baseURL }
+
+function isCode10013(buf) {
+  try {
+    const j = JSON.parse(buf.toString("utf8"))
+    return String(j?.code || j?.error?.code || "") === "10013" ||
+      /Invalid request parameters/i.test(String(j?.error?.message || j?.message || ""))
+  } catch {
+    return false
+  }
+}
+
+function sanitizeSchema(node) {
+  if (!node || typeof node !== "object") return
+  if (Array.isArray(node)) {
+    for (const child of node) sanitizeSchema(child)
+    return
+  }
+  delete node.$schema
+  for (const key of ["allOf", "anyOf", "oneOf"]) {
+    if (Array.isArray(node[key])) {
+      const kept = node[key].filter((part) => !part || !part.pattern)
+      if (kept.length) node[key] = kept
+      else delete node[key]
+    }
+  }
+  if (node.pattern && /\\[uU]|\^\[\^/.test(String(node.pattern))) delete node.pattern
+  for (const value of Object.values(node)) sanitizeSchema(value)
+}
+
+function simplifyTools(j, level) {
+  if (!Array.isArray(j.tools)) return false
+  if (level === 1) {
+    for (const t of j.tools) sanitizeSchema(t?.function?.parameters ?? t?.parameters)
+    return true
+  }
+  if (level === 2) {
+    for (const t of j.tools) {
+      const p = t?.function?.parameters ?? t?.parameters
+      if (!p) continue
+      delete p.$schema; delete p.additionalProperties
+      delete p.allOf; delete p.anyOf; delete p.oneOf
+      const walk = (n) => {
+        if (!n || typeof n !== "object") return
+        if (Array.isArray(n)) return n.forEach(walk)
+        delete n.pattern; delete n.minLength; delete n.maxLength
+        delete n.minimum; delete n.maximum; delete n.multipleOf
+        Object.values(n).forEach(walk)
+      }
+      walk(p)
+    }
+    return true
+  }
+  if (level === 3) {
+    delete j.tools; delete j.tool_choice
+    return true
+  }
+  return false
+}
+
+function forwardUpstream(upstream, method, path, headers, body) {
+  return new Promise((resolve) => {
+    const u = new URL(upstream)
+    const req = httpsRequest(
+      {
+        hostname: u.hostname,
+        port: u.port || 443,
+        servername: u.hostname,
+        path: u.pathname.replace(/\/$/, "") + path,
+        method,
+        headers: { ...headers, host: u.host, "content-length": String(body.length) },
+        timeout: 180000,
+      },
+      (up) => {
+        const chunks = []
+        up.on("data", (c) => chunks.push(c))
+        up.on("end", () => resolve({ status: up.statusCode || 502, headers: up.headers, body: Buffer.concat(chunks) }))
+        up.on("error", (e) => resolve({ status: 502, headers: {}, body: Buffer.from(JSON.stringify({ error: e.message })) }))
+      },
+    )
+    req.on("timeout", () => req.destroy(new Error("upstream timeout")))
+    req.on("error", (e) => resolve({ status: 502, headers: {}, body: Buffer.from(JSON.stringify({ error: e.message })) }))
+    req.end(body)
+  })
+}
+
+async function ensureProxy() {
+  if (proxyState) return proxyState
+  const upstream = UPSTREAM_BASE
+  const server = createServer((req, res) => {
+    const reqPath = req.url || "/"
+    const reqMethod = req.method || "GET"
+    const chunks = []
+    req.on("data", (c) => chunks.push(c))
+    req.on("end", async () => {
+      let body = Buffer.concat(chunks)
+      let parsed = null
+      if (body.length) try { parsed = JSON.parse(body.toString("utf8")) } catch {}
+      if (parsed) {
+        for (const k of DROP_PARAMS) delete parsed[k]
+        body = Buffer.from(JSON.stringify(parsed), "utf8")
+      }
+      const headers = { ...req.headers }
+      delete headers.connection
+      delete headers["content-length"]
+      delete headers.host
+      let result
+      for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+        result = await forwardUpstream(upstream, reqMethod, reqPath, headers, body)
+        if (result.status !== 400 || !isCode10013(result.body)) break
+        if (!parsed || !simplifyTools(parsed, attempt + 1)) break
+        body = Buffer.from(JSON.stringify(parsed), "utf8")
+      }
+      const outHeaders = { ...result.headers }
+      delete outHeaders.connection
+      delete outHeaders["transfer-encoding"]
+      if (!outHeaders["content-type"]) outHeaders["content-type"] = "application/json"
+      res.writeHead(result.status, outHeaders)
+      res.end(result.body)
+    })
+  })
+  await new Promise((resolve, reject) => {
+    server.once("error", reject)
+    server.listen(PROXY_PORT, "127.0.0.1", resolve)
+  })
+  server.unref?.()
+  proxyState = { server, baseURL: `http://127.0.0.1:${PROXY_PORT}` }
+  return proxyState
+}
+
+async function proxyBaseURL() {
+  try {
+    const { baseURL } = await ensureProxy()
+    return baseURL
+  } catch {
+    return UPSTREAM_BASE
+  }
+}
 
 function selectedIds(allIds) {
   const spec = (process.env.SCNET_MODELS || "").trim().toLowerCase()
@@ -50,7 +200,7 @@ async function probeIds(key, ids) {
     while (queue.length) {
       const id = queue.shift()
       try {
-        const r = await fetch(`${BASE}/chat/completions`, {
+        const r = await fetch(`${UPSTREAM_BASE}/chat/completions`, {
           method: "POST",
           headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
           body: JSON.stringify({ model: id, messages: [{ role: "user", content: "hi" }], max_tokens: 1, stream: false }),
@@ -120,106 +270,95 @@ async function sendPhoneCode(phoneNum) {
     body: new URLSearchParams({ phoneNum: phone }),
     signal: AbortSignal.timeout(20000),
   })
-  const j = await r.json()
-  if (String(j?.code) !== "0") throw new Error(`发送验证码失败：${j?.msg || j?.code || r.status}`)
-  const cookie = cookiesOf(r)
-  pendingSms = { phoneNum: phone, cookie, at: Date.now() }
-  return { phoneNum: phone, cookie }
+  const j = await r.json().catch(() => null)
+  if (j?.type === "success" || j?.code === "0000" || j?.code === 0) {
+    pendingSms = { phoneNum: phone, cookie: cookiesOf(r), at: Date.now() }
+    return { ok: true }
+  }
+  throw new Error(j?.msg || j?.message || `发送失败 (${r.status})`)
 }
 
-async function exchangePhoneCode(cookie, messageCode) {
-  const code = String(messageCode || "").trim()
-  if (!code) throw new Error("请填写短信验证码")
+async function loginWithPhoneCode(phoneNum, code) {
+  const phone = String(phoneNum || "").trim()
+  const messageCode = String(code || "").trim()
+  if (!phone || !messageCode) throw new Error("手机号和验证码都要填")
+  const c = pendingSms && pendingSms.phoneNum === phone && Date.now() - pendingSms.at < 10 * 60_000 ? pendingSms.cookie : ""
   const r = await fetch(LOGIN_CODE_URL, {
     method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded", "user-agent": UA, ...(cookie ? { cookie } : {}) },
-    body: new URLSearchParams({ messageCode: code }),
+    headers: { "content-type": "application/x-www-form-urlencoded", "user-agent": UA, ...(c ? { cookie: c } : {}) },
+    body: new URLSearchParams({ messageCode }),
     signal: AbortSignal.timeout(20000),
   })
-  const j = await r.json()
-  if (String(j?.code) !== "0") throw new Error(`短信登录失败：${j?.msg || j?.code || r.status}`)
-  const full = [cookie, cookiesOf(r)].filter(Boolean).join("; ")
-  const r2 = await fetch(ACTIVITY_KEY_URL, {
+  const j = await r.json().catch(() => null)
+  if (!(j?.type === "success" || j?.code === "0000" || j?.code === 0)) {
+    throw new Error(j?.msg || j?.message || `登录失败 (${r.status})`)
+  }
+  const cookie = cookiesOf(r) || c
+  if (!cookie) throw new Error("登录接口未返回 Cookie（Token）")
+  return exchangePhoneCode(cookie)
+}
+
+async function exchangePhoneCode(cookie) {
+  const r = await fetch(ACTIVITY_KEY_URL, {
     method: "POST",
-    headers: { "content-type": "application/json", cookie: full, "user-agent": UA },
+    headers: { cookie, "content-type": "application/json", "user-agent": UA },
     body: "{}",
     signal: AbortSignal.timeout(20000),
   })
-  const j2 = await r2.json()
-  const key = j2?.data?.apiKey
-  if (!key) throw new Error(`取 API Key 失败：${j2?.msg || j2?.code || r2.status}`)
-  return { key, baseUrl: j2.data.baseUrl }
-}
-
-async function loginWithPhoneCode(phoneNum, messageCode) {
-  const phone = String(phoneNum || "").trim()
-  let cookie = ""
-  if (pendingSms && pendingSms.phoneNum === phone && Date.now() - pendingSms.at < 5 * 60 * 1000) {
-    cookie = pendingSms.cookie
-  } else {
-    cookie = (await sendPhoneCode(phone)).cookie
-  }
-  const out = await exchangePhoneCode(cookie, messageCode)
-  pendingSms = null
-  return out
+  const j = await r.json().catch(() => null)
+  const key = j?.data?.apiKey
+  if (!key) throw new Error(j?.msg || j?.message || "创建 API Key 失败")
+  return { key, baseUrl: String(j?.data?.baseUrl || UPSTREAM_BASE).replace(/\/+$/, "") }
 }
 
 async function loginWithPassword(username, password) {
-  if (await needCaptcha()) {
-    throw new Error("该账号当前需要图形验证码。请先用 API Key 登录，或在 scnet.cn 网页登录一次后再试。")
-  }
-  const body = new URLSearchParams({
-    username,
-    password: await rsaEncrypt(password),
-    captcha: "",
-    captchaKey: "",
-    encrypted: "true",
-    ph: "1",
-  })
+  const user = String(username || "").trim()
+  const pass = String(password || "")
+  if (!user || !pass) throw new Error("用户名和密码都要填")
+  if (await needCaptcha()) throw new Error("账号需要验证码，请先在浏览器登录一次 scnet.cn 解除，或改用「发送短信验证码」。")
+
+  const encryptedPwd = await rsaEncrypt(pass)
+  const body = new URLSearchParams({ username: user, password: encryptedPwd, encrypted: "true", ph: "1" })
   const r = await fetch(LOGIN_URL, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded", "user-agent": UA },
     body,
     signal: AbortSignal.timeout(20000),
   })
-  const j = await r.json()
-  if (String(j?.code) !== "0") throw new Error(`SCNet 登录失败：${j?.msg || j?.code || r.status}`)
+  const j = await r.json().catch(() => null)
+  if (!(j?.type === "success" || j?.code === "0000" || j?.code === 0)) {
+    throw new Error(j?.msg || j?.message || `登录失败 (${r.status})`)
+  }
   const cookie = cookiesOf(r)
-  if (!cookie) throw new Error("SCNet 登录成功但没有拿到会话 cookie")
-
-  const r2 = await fetch(ACTIVITY_KEY_URL, {
-    method: "POST",
-    headers: { "content-type": "application/json", cookie, "user-agent": UA },
-    body: "{}",
-    signal: AbortSignal.timeout(20000),
-  })
-  const j2 = await r2.json()
-  const key = j2?.data?.apiKey
-  if (!key) throw new Error(`取 API Key 失败：${j2?.msg || j2?.code || r2.status}（账号可能未开通模型服务）`)
-  return { key, baseUrl: j2.data.baseUrl, model: j2.data.model }
+  if (!cookie) throw new Error("登录接口未返回 Cookie（Token）")
+  return exchangePhoneCode(cookie)
 }
 
-// ---------- 凭据：优先客户端目录，其次显式 key ----------
-
+// ---------- 凭据：读 SCNet 客户端本机目录 ----------
 function keysFromClient() {
-  const out = []
+  let files
   try {
-    for (const f of readdirSync(CRED_DIR)) {
-      if (!f.endsWith(".json")) continue
-      const p = join(CRED_DIR, f)
-      try {
-        const d = JSON.parse(readFileSync(p, "utf8"))
-        const k = d?.scnet?.key
-        if (typeof k === "string" && k.length > 10) out.push({ key: k, file: f, mtime: statSync(p).mtimeMs })
-      } catch {}
-    }
-  } catch {}
+    files = readdirSync(CRED_DIR).filter((f) => f.endsWith(".json"))
+  } catch {
+    return []
+  }
+  const out = []
+  for (const f of files) {
+    const p = join(CRED_DIR, f)
+    try {
+      const st = statSync(p)
+      if (!st.isFile()) continue
+      const d = JSON.parse(readFileSync(p, "utf8"))
+      const k = d?.scnet?.key
+      if (typeof k === "string" && k.length > 10) out.push({ key: k, file: f, mtime: st.mtimeMs })
+    } catch {}
+  }
   return out.sort((a, b) => b.mtime - a.mtime)
 }
 
 async function keyWorks(key) {
   try {
-    const r = await fetch(`${BASE}/models`, {
+    const r = await fetch(`${UPSTREAM_BASE}/models`, {
       headers: { authorization: `Bearer ${key}` },
       signal: AbortSignal.timeout(8000),
     })
@@ -256,7 +395,7 @@ async function clientKey() {
 async function resolveCred(raw) {
   const s = String(raw ?? "").trim()
   if (!s || /^(local|auto|本机|自动)$/i.test(s)) {
-    return { baseUrl: BASE, apiKey: await clientKey(), models: null }
+    return { baseUrl: UPSTREAM_BASE, apiKey: await clientKey(), models: null }
   }
   if (s.startsWith("{")) {
     let j
@@ -268,12 +407,12 @@ async function resolveCred(raw) {
     const apiKey = j.apiKey || j.key
     if (!apiKey) throw new Error("凭据 JSON 缺少 apiKey")
     return {
-      baseUrl: String(j.baseUrl || j.baseURL || BASE).replace(/\/+$/, ""),
+      baseUrl: String(j.baseUrl || j.baseURL || UPSTREAM_BASE).replace(/\/+$/, ""),
       apiKey,
       models: Array.isArray(j.models) && j.models.length ? j.models : null,
     }
   }
-  return { baseUrl: BASE, apiKey: s, models: null }
+  return { baseUrl: UPSTREAM_BASE, apiKey: s, models: null }
 }
 
 // ---------- 模型目录：客户端元数据 + 平台 /models 交叉 ----------
@@ -330,7 +469,7 @@ export const SCNetAuthPlugin = async ({ client }) => ({
     cfg.provider[PROVIDER] ??= {
       name: "SCNet 计算互联网",
       npm: "@ai-sdk/openai-compatible",
-      api: BASE,
+      api: UPSTREAM_BASE,
       models: Object.fromEntries(
         Object.entries(FALLBACK).map(([id, m]) => [
           id,
@@ -399,8 +538,8 @@ export const SCNetAuthPlugin = async ({ client }) => ({
       const auth = await getAuth()
       if (auth?.type !== "api") return {}
       const cred = await resolveCred(auth.key)
-      const metaBase = typeof auth.metadata?.baseUrl === "string" ? auth.metadata.baseUrl.replace(/\/+$/, "") : ""
-      return { baseURL: metaBase || cred.baseUrl, apiKey: cred.apiKey }
+      // 强制走本地过滤代理；自定义 baseUrl 仅用于 models 发现，不直连发给上游。
+      return { baseURL: await proxyBaseURL(), apiKey: cred.apiKey }
     },
   },
 
@@ -440,4 +579,4 @@ export const SCNetAuthPlugin = async ({ client }) => ({
   },
 })
 
-export const _internal = { PROVIDER, BASE, keysFromClient, clientKey, clientCatalog, toModel, loginWithPassword, rsaEncrypt, sendPhoneCode, loginWithPhoneCode, exchangePhoneCode }
+export const _internal = { PROVIDER, UPSTREAM_BASE, PROXY_PORT, ensureProxy, proxyBaseURL, keysFromClient, clientKey, clientCatalog, toModel, loginWithPassword, rsaEncrypt, sendPhoneCode, loginWithPhoneCode, exchangePhoneCode }
